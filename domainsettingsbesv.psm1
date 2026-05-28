@@ -1,535 +1,812 @@
-# ============================================================
+﻿# ============================================================
 # Auteur  : besv
 # Bestand : domainsettingsbesv.psm1
-# Doel    : Domeinconfiguratie: DC installatie, OUs, security
-#           groups, gebruikers, groepsleden, NTFS/share-rechten
+# Doel    : Domeinconfiguratie:
+#           - installatie domain controller
+#           - aanmaken OU's
+#           - security groups
+#           - domain users
+#           - groepslidmaatschappen
+#           - folders
+#           - SMB shares
+#           - NTFS rechten
+#
+# Beschrijving :
+# Deze module bevat alle functies voor de
+# Active Directory en fileserver configuratie.
 #
 # Bronnen :
-#   F. Vanhoo, "PowerShell Vlot gebruiken", Die Keure, 2022/2025
-#     - Hoofdstuk 10 : Active Directory
-#     - Hoofdstuk 11 : Gebruikers en groepen
-#   https://learn.microsoft.com/en-us/powershell/module/
-#     addsdeployment/install-addsforest
-#   https://learn.microsoft.com/en-us/powershell/module/
-#     activedirectory/
-#   https://learn.microsoft.com/en-us/powershell/module/
-#     smbshare/grant-smbshareaccess
-#   https://learn.microsoft.com/en-us/powershell/module/
-#     microsoft.powershell.security/set-acl
+#
+# Boek:
+#   F. Vanhoo,
+#   "PowerShell Vlot gebruiken",
+#   Die Keure, tweede editie, 2022/2025
+#
+#   Gebruikte hoofdstukken:
+#   - Hfst. 41  : Modules
+#   - Hfst. 71  : Methoden, functies en cmdlets
+#   - Hfst. 79  : CSV-bestanden
+#   - Hfst. 80  : XML-bestanden
+#   - Hfst. 81  : JSON-bestanden
+#   - Hfst. 83  : Where-Object
+#   - Hfst. 129 : Active Directory
+#   - Hfst. 138 : Scripts en modules
+#   - Hfst. 144 : Scripts, modules en functies opbouwen
+#   - Hfst. 149 : Fouten opvangen
+#   - Hfst. 151 : Try, catch en finally
+#
+# Microsoft Learn:
+#   https://learn.microsoft.com/en-us/powershell/
+#
 # ============================================================
 
+# ============================================================
+# VARIABELEN
+# ============================================================
 
-# ─────────────────────────────────────────────────────────────────────
-function Haal-DomeinInstellingenOp {
-<#
-.SYNOPSIS
-    Laadt Domain.Settings.xml en geeft het XML-object terug.
-.DESCRIPTION
-    Zoekt het bestand in de map \scripting\settings\.
-    Gooit een fout als het bestand niet gevonden wordt.
-    Bron: F. Vanhoo, "PowerShell Vlot gebruiken", 2022, hfst. 7
-.EXAMPLE
-    $xml = Haal-DomeinInstellingenOp
-    $xml.Settings.Domain.domainname
-#>
-    $pad = "$global:scriptRoot\settings\Domain.Settings.xml"
+$ScriptRoot = Split-Path `
+    -Parent `
+    $PSScriptRoot
 
-    if (-not (Test-Path $pad)) {
-        Schrijf-Log "FOUT: Domain.Settings.xml niet gevonden op $pad"
-        throw "Bestand niet gevonden: $pad"
-    }
+$DomainSettingsFile = `
+    "$ScriptRoot\settings\Domain.Settings.xml"
 
-    return [xml](Get-Content $pad -Encoding UTF8)
+$UsersFile = `
+    "$ScriptRoot\settings\users.json"
+
+$GroupsFile = `
+    "$ScriptRoot\settings\securitygroups.csv"
+
+$SharesFile = `
+    "$ScriptRoot\settings\shares.csv"
+
+$RightsFile = `
+    "$ScriptRoot\settings\rechten.csv"
+
+$FoldersFile = `
+    "$ScriptRoot\settings\mappen.txt"
+
+$LogFile = `
+    "$ScriptRoot\logs\InstallatieLogbesv.txt"
+
+# ============================================================
+# ACTIVE DIRECTORY MODULE
+# ============================================================
+
+if (-not(Get-Module -ListAvailable -Name ActiveDirectory)) {
+
+    Write-Host ""
+    Write-Host `
+        "Active Directory module niet gevonden." `
+        -ForegroundColor Red
+
+    return
 }
 
+Import-Module ActiveDirectory
 
-# ─────────────────────────────────────────────────────────────────────
-function Installeer-Domeincontroller {
+# ============================================================
+# FUNCTION : Write-BESVDomainLog
+# ============================================================
+
+function Write-BESVDomainLog {
+
 <#
 .SYNOPSIS
-    Installeert een domeincontroller of voegt een extra DC toe
-    aan een bestaand domein.
+Schrijft informatie weg naar logbestand.
+
 .DESCRIPTION
-    Leest domeinnaam en NetBIOS-naam uit Domain.Settings.xml.
-    Controleert eerst of het domein al bestaat via Get-ADDomain:
-      - Domein bestaat  : server wordt toegevoegd als extra DC
-                          via Install-ADDSDomainController.
-      - Domein bestaat niet : nieuw domein aangemaakt
-                              via Install-ADDSForest.
-    De AD DS-rol wordt eerst geïnstalleerd.
-    Bron: F. Vanhoo, "PowerShell Vlot gebruiken", 2022, hfst. 10
-    https://learn.microsoft.com/en-us/powershell/module/
-      addsdeployment/install-addsforest
-    https://learn.microsoft.com/en-us/powershell/module/
-      addsdeployment/install-addsdomaincontroller
+Deze functie schrijft meldingen weg naar het
+centrale logbestand van het project.
+
 .EXAMPLE
-    Installeer-Domeincontroller
+Write-BESVDomainLog -Message "OU aangemaakt"
+
+.NOTES
+Auteur : besv
+
+Bronnen :
+F. Vanhoo,
+"PowerShell Vlot gebruiken"
+
+- Hfst. 71
+- Hfst. 144
+
 #>
-    Schrijf-Log "#### Start installatie domeincontroller... ####"
+
+    param(
+        [string]$Message
+    )
+
+    $Date = `
+        Get-Date -Format "dd-MM-yyyy HH:mm:ss"
+
+    "$Date - $Message" |
+        Out-File `
+        -FilePath $LogFile `
+        -Append
+}
+
+# ============================================================
+# FUNCTION : Test-BESVDomainExists
+# ============================================================
+
+function Test-BESVDomainExists {
+
+<#
+.SYNOPSIS
+Controleert of domein bestaat.
+
+.DESCRIPTION
+Controleert of Active Directory reeds actief is.
+
+.EXAMPLE
+Test-BESVDomainExists
+
+.NOTES
+Auteur : besv
+
+Bronnen :
+- Hfst. 129 : Active Directory
+
+#>
 
     try {
-        $xml      = Haal-DomeinInstellingenOp
-        $domein   = $xml.Settings.Domain.domainname
-        $netbios  = $xml.Settings.Domain.domainNetbiosName
-        $veiligWw = ConvertTo-SecureString $xml.Settings.UserSettings.defaultPassword -AsPlainText -Force
 
-        # AD DS-rol installeren
-        # Bron: https://learn.microsoft.com/en-us/powershell/module/
-        #         servermanager/install-windowsfeature
-        Write-Host "AD DS-rol installeren..." -ForegroundColor Cyan
-        Install-WindowsFeature -Name AD-Domain-Services -IncludeManagementTools | Out-Null
-        Schrijf-Log "Windows-feature AD-Domain-Services geïnstalleerd."
+        Get-ADDomain | Out-Null
 
-        # Controleer of domein al bestaat
-        try {
-            Get-ADDomain -Identity $domein -ErrorAction Stop | Out-Null
-            $domeinBestaat = $true
-        }
-        catch {
-            $domeinBestaat = $false
-        }
-
-        if ($domeinBestaat) {
-            Write-Host "Domein '$domein' bestaat al. Extra DC toevoegen..." -ForegroundColor Yellow
-            Schrijf-Log "Domein '$domein' bestaat. Extra DC wordt toegevoegd."
-
-            $beheerdersgegevens = Get-Credential -Message "Domein administrator-credentials"
-
-            Install-ADDSDomainController `
-                -DomainName                    $domein `
-                -Credential                    $beheerdersgegevens `
-                -SafeModeAdministratorPassword $veiligWw `
-                -InstallDns `
-                -Force | Out-Null
-        }
-        else {
-            Write-Host "Domein '$domein' bestaat niet. Nieuw domein aanmaken..." -ForegroundColor Cyan
-            Schrijf-Log "Nieuw domein aanmaken: $domein (NetBIOS: $netbios)"
-
-            Install-ADDSForest `
-                -DomainName                    $domein `
-                -DomainNetBiosName             $netbios `
-                -SafeModeAdministratorPassword $veiligWw `
-                -InstallDns `
-                -Force | Out-Null
-        }
-
-        Schrijf-Log "#### Finished domeincontroller installatie. Systeem wordt herstart. ####"
+        return $true
     }
     catch {
-        Schrijf-Log "FOUT bij installatie domeincontroller: $_"
-        Write-Host "FOUT: $_" -ForegroundColor Red
-        Read-Host "Druk op ENTER om verder te gaan"
+
+        return $false
     }
 }
 
+# ============================================================
+# FUNCTION : Install-BESVDomainController
+# ============================================================
 
-# ─────────────────────────────────────────────────────────────────────
-function Maak-OUsAan {
+function Install-BESVDomainController {
+
 <#
 .SYNOPSIS
-    Maakt organisatie-eenheden aan op basis van ous.csv.
+Installeert domain controller.
+
 .DESCRIPTION
-    Kolommen in ous.csv: Name;Path
-    De kolom Path bevat kommagescheiden ouder-OUs van laag naar hoog,
-    bv. "Management,Corporate" = Corporate is de bovenste OU.
-    Ouder-OUs worden eerst aangemaakt indien ze nog niet bestaan.
-    Bestaande OUs geven een melding maar stoppen het script niet.
-    Bron: F. Vanhoo, "PowerShell Vlot gebruiken", 2022, hfst. 10
-    https://learn.microsoft.com/en-us/powershell/module/
-      activedirectory/new-adorganizationalunit
+Deze functie:
+- installeert ADDS
+- maakt domein aan
+- configureert DNS
+
+Gebruikt:
+Domain.Settings.xml
+
 .EXAMPLE
-    Maak-OUsAan
+Install-BESVDomainController
+
+.NOTES
+Auteur : besv
+
+Bronnen :
+
+F. Vanhoo,
+"PowerShell Vlot gebruiken"
+
+- Hfst. 129 : Active Directory
+- Hfst. 149 : Fouten opvangen
+- Hfst. 151 : Try/Catch
+
+Microsoft Learn:
+Install-ADDSForest
+
 #>
-    Schrijf-Log "#### Creating organizational units... ####"
 
-    $bestand = "$global:scriptRoot\settings\ous.csv"
+    [xml]$Settings = `
+        Get-Content $DomainSettingsFile
 
-    if (-not (Test-Path $bestand)) {
-        Schrijf-Log "FOUT: ous.csv niet gevonden op $bestand"
-        Read-Host "Druk op ENTER om verder te gaan"
+    $DomainName = `
+        $Settings.Settings.Domain.domainname
+
+    $DomainName = `
+        $DomainName.Replace("xxx","besv")
+
+    if (Test-BESVDomainExists) {
+
+        Write-Host ""
+        Write-Host `
+            "Domein bestaat reeds." `
+            -ForegroundColor Yellow
+
+        Write-BESVDomainLog `
+            -Message "Domein bestaat reeds"
+
         return
     }
 
-    $domeinDN = (Get-ADDomain).DistinguishedName
-    $rijen    = Import-Csv $bestand -Delimiter ";" -Encoding UTF8
+    try {
 
-    foreach ($rij in $rijen) {
-        $naam = $rij.Name.Trim()
-        $pad  = $rij.Path.Trim()
+        Install-WindowsFeature `
+            AD-Domain-Services `
+            -IncludeManagementTools
 
-        # Bepaal het bovenliggende OU-pad
-        if ([string]::IsNullOrEmpty($pad)) {
-            $bovenliggende = $domeinDN
-        }
-        else {
-            # Keer de volgorde om: "Management,Corporate" => [Corporate, Management]
-            # Bron: F. Vanhoo, 2022, p. 78 – arrays en omdraaien
-            $ouders = ($pad -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-            [array]::Reverse($ouders)
+        Write-Host ""
+        Write-Host `
+            "Installatie ADDS gestart..." `
+            -ForegroundColor Cyan
 
-            $bovenliggende = $domeinDN
-            foreach ($ouder in $ouders) {
-                $ouderDN = "OU=$ouder,$bovenliggende"
-                if (-not (Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$ouderDN'" -ErrorAction SilentlyContinue)) {
-                    New-ADOrganizationalUnit -Name $ouder -Path $bovenliggende -ProtectedFromAccidentalDeletion $false
-                    Schrijf-Log "Bovenliggende OU aangemaakt: $ouder"
-                }
-                $bovenliggende = $ouderDN
-            }
-        }
+        Install-ADDSForest `
+            -DomainName $DomainName `
+            -InstallDns `
+            -Force:$true
 
-        # De OU zelf aanmaken
-        $volleDN = "OU=$naam,$bovenliggende"
-
-        if (Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$volleDN'" -ErrorAction SilentlyContinue) {
-            Write-Host "Didn't create OU $naam in $domeinDN, must exist already" -ForegroundColor Yellow
-            Schrijf-Log "Didn't create OU $naam in $domeinDN, must exist already"
-        }
-        else {
-            try {
-                New-ADOrganizationalUnit -Name $naam -Path $bovenliggende -ProtectedFromAccidentalDeletion $false
-                Schrijf-Log "Created OU $naam in $domeinDN"
-                Write-Host "Created OU $naam" -ForegroundColor Green
-            }
-            catch {
-                Schrijf-Log "FOUT bij aanmaken OU '$naam': $_"
-                Write-Host "FOUT: $_" -ForegroundColor Red
-            }
-        }
+        Write-BESVDomainLog `
+            -Message `
+            "Domain controller geïnstalleerd"
     }
+    catch {
 
-    Schrijf-Log "#### Finished creating organizational units... ####"
-    Read-Host "Druk op ENTER om verder te gaan"
+        Write-Host `
+            "Fout tijdens installatie domain controller." `
+            -ForegroundColor Red
+
+        Write-BESVDomainLog `
+            -Message `
+            "Fout tijdens installatie domain controller"
+    }
 }
 
+# ============================================================
+# FUNCTION : New-BESVOUs
+# ============================================================
 
-# ─────────────────────────────────────────────────────────────────────
-function Maak-SecurityGroupsAan {
+function New-BESVOUs {
+
 <#
 .SYNOPSIS
-    Maakt domain security groups aan op basis van securitygroups.csv.
+Maakt OU's aan.
+
 .DESCRIPTION
-    Kolommen in securitygroups.csv: GroepNaam;ou
-    Groepen met prefix DL_ worden als DomainLocal aangemaakt.
-    Groepen met prefix GL_ worden als Global aangemaakt.
-    De doelOU wordt aangemaakt als ze nog niet bestaat.
-    Bestaande groepen geven een melding maar stoppen het script niet.
-    Bron: F. Vanhoo, "PowerShell Vlot gebruiken", 2022, hfst. 11
-    https://learn.microsoft.com/en-us/powershell/module/
-      activedirectory/new-adgroup
+Deze functie maakt de Organizational Units aan
+voor het domein.
+
 .EXAMPLE
-    Maak-SecurityGroupsAan
+New-BESVOUs
+
+.NOTES
+Auteur : besv
+
+Bronnen :
+- Hfst. 129 : Active Directory
+- Hfst. 79  : CSV-bestanden
+
 #>
-    Schrijf-Log "#### Creating security groups... ####"
 
-    $bestand = "$global:scriptRoot\settings\securitygroups.csv"
+    $OUs = @(
+        "Corporate",
+        "Management",
+        "HR",
+        "Finance",
+        "Operations",
+        "IT",
+        "Production",
+        "Sales",
+        "Domestic",
+        "International",
+        "Infrastructure"
+    )
 
-    if (-not (Test-Path $bestand)) {
-        Schrijf-Log "FOUT: securitygroups.csv niet gevonden op $bestand"
-        Read-Host "Druk op ENTER om verder te gaan"
-        return
-    }
+    $DomainDN = `
+        (Get-ADDomain).DistinguishedName
 
-    $domeinDN = (Get-ADDomain).DistinguishedName
-    $rijen    = Import-Csv $bestand -Delimiter ";" -Encoding UTF8
+    foreach ($OU in $OUs) {
 
-    foreach ($rij in $rijen) {
-        $groepNaam = $rij.GroepNaam.Trim()
-        $ouNaam    = $rij.ou.Trim()
+        try {
 
-        # Groepsscope bepalen op basis van prefix
-        # Bron: F. Vanhoo, 2022, p. 201
-        $groepScope = if ($groepNaam -like "DL_*") { "DomainLocal" } else { "Global" }
+            $Exists = `
+                Get-ADOrganizationalUnit `
+                -Filter "Name -eq '$OU'" `
+                -ErrorAction SilentlyContinue
 
-        # OU aanmaken als ze niet bestaat
-        $ouDN = "OU=$ouNaam,$domeinDN"
-        if (-not (Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$ouDN'" -ErrorAction SilentlyContinue)) {
-            New-ADOrganizationalUnit -Name $ouNaam -Path $domeinDN -ProtectedFromAccidentalDeletion $false
-            Schrijf-Log "Extra OU aangemaakt voor groep '$groepNaam': $ouNaam"
-        }
+            if (-not($Exists)) {
 
-        if (Get-ADGroup -Filter "Name -eq '$groepNaam'" -ErrorAction SilentlyContinue) {
-            Write-Host "Groep bestaat al: $groepNaam" -ForegroundColor Yellow
-            Schrijf-Log "Groep bestaat reeds: $groepNaam"
-        }
-        else {
-            try {
-                New-ADGroup -Name $groepNaam -GroupScope $groepScope -GroupCategory Security -Path $ouDN
-                Schrijf-Log "Groep aangemaakt: $groepNaam ($groepScope) in OU=$ouNaam"
-                Write-Host "Groep aangemaakt: $groepNaam ($groepScope)" -ForegroundColor Green
-            }
-            catch {
-                Schrijf-Log "FOUT bij aanmaken groep '$groepNaam': $_"
-                Write-Host "FOUT: $_" -ForegroundColor Red
-            }
-        }
-    }
+                New-ADOrganizationalUnit `
+                    -Name $OU `
+                    -Path $DomainDN
 
-    Schrijf-Log "#### Finished creating security groups... ####"
-    Read-Host "Druk op ENTER om verder te gaan"
-}
+                Write-Host `
+                    "OU aangemaakt: $OU" `
+                    -ForegroundColor Green
 
-
-# ─────────────────────────────────────────────────────────────────────
-function Maak-DomeingebruikersAan {
-<#
-.SYNOPSIS
-    Maakt domeingebruikers aan op basis van users.json.
-.DESCRIPTION
-    Per gebruiker worden voornaam, achternaam, login en doelOU
-    gelezen. Het standaardwachtwoord komt uit Domain.Settings.xml.
-    De homemap wordt ingesteld als UNC-pad: \\server\share$\login.
-    De doelOU wordt aangemaakt als ze nog niet bestaat.
-    Bestaande gebruikers geven een melding maar stoppen het script niet.
-    Bron: F. Vanhoo, "PowerShell Vlot gebruiken", 2022, hfst. 11
-    https://learn.microsoft.com/en-us/powershell/module/
-      activedirectory/new-aduser
-.EXAMPLE
-    Maak-DomeingebruikersAan
-#>
-    Schrijf-Log "#### Creating domain users... ####"
-
-    $bestand = "$global:scriptRoot\settings\users.json"
-
-    if (-not (Test-Path $bestand)) {
-        Schrijf-Log "FOUT: users.json niet gevonden op $bestand"
-        Read-Host "Druk op ENTER om verder te gaan"
-        return
-    }
-
-    $xml        = Haal-DomeinInstellingenOp
-    $domeinDN   = (Get-ADDomain).DistinguishedName
-    $dnsRoot    = (Get-ADDomain).DNSRoot
-    $standWw    = ConvertTo-SecureString $xml.Settings.UserSettings.defaultPassword -AsPlainText -Force
-    $bestandsServer = $xml.Settings.FileServer.name
-    $homeShare  = $xml.Settings.UserSettings.homeFolder.sharename
-    $homeLetter = $xml.Settings.UserSettings.homeFolder.homeDrive + ":"
-
-    # JSON inlezen
-    # Bron: F. Vanhoo, 2022, hfst. 7 – ConvertFrom-Json
-    $gebruikers = (Get-Content $bestand -Raw -Encoding UTF8 | ConvertFrom-Json).users
-
-    foreach ($gebruiker in $gebruikers) {
-        $aanmelding = $gebruiker.login.Trim()
-        $ouNaam     = $gebruiker.ou.Trim()
-
-        # OU opzoeken of aanmaken
-        $ouObject = Get-ADOrganizationalUnit -Filter "Name -eq '$ouNaam'" -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
-
-        if (-not $ouObject) {
-            New-ADOrganizationalUnit -Name $ouNaam -Path $domeinDN -ProtectedFromAccidentalDeletion $false
-            Schrijf-Log "OU aangemaakt voor gebruiker '$aanmelding': $ouNaam"
-            $ouObject = Get-ADOrganizationalUnit -Filter "Name -eq '$ouNaam'" | Select-Object -First 1
-        }
-
-        if (Get-ADUser -Filter "SamAccountName -eq '$aanmelding'" -ErrorAction SilentlyContinue) {
-            Write-Host "Gebruiker bestaat al: $aanmelding" -ForegroundColor Yellow
-            Schrijf-Log "Gebruiker bestaat reeds: $aanmelding"
-        }
-        else {
-            try {
-                # UNC-pad voor homemap (verplicht voor netwerkshares)
-                # Bron: F. Vanhoo, 2022, p. 215 – UNC-paden
-                $thuisMap = "\\$bestandsServer\$homeShare\$aanmelding"
-
-                New-ADUser `
-                    -GivenName             $gebruiker.firstName `
-                    -Surname               $gebruiker.lastName `
-                    -Name                  "$($gebruiker.firstName) $($gebruiker.lastName)" `
-                    -SamAccountName        $aanmelding `
-                    -UserPrincipalName     "$aanmelding@$dnsRoot" `
-                    -Path                  $ouObject.DistinguishedName `
-                    -AccountPassword       $standWw `
-                    -ChangePasswordAtLogon $false `
-                    -Enabled               $true `
-                    -HomeDirectory         $thuisMap `
-                    -HomeDrive             $homeLetter
-
-                Schrijf-Log "Gebruiker aangemaakt: $aanmelding ($($gebruiker.firstName) $($gebruiker.lastName)) in OU=$ouNaam"
-                Write-Host "Gebruiker aangemaakt: $aanmelding" -ForegroundColor Green
-            }
-            catch {
-                Schrijf-Log "FOUT bij aanmaken gebruiker '$aanmelding': $_"
-                Write-Host "FOUT: $_" -ForegroundColor Red
-            }
-        }
-    }
-
-    Schrijf-Log "#### Finished creating domain users... ####"
-    Read-Host "Druk op ENTER om verder te gaan"
-}
-
-
-# ─────────────────────────────────────────────────────────────────────
-function Voeg-GebruikersToeAanGroepen {
-<#
-.SYNOPSIS
-    Voegt domeingebruikers toe aan security groups via users.json.
-.DESCRIPTION
-    Leest het veld securityGroups per gebruiker uit users.json.
-    Als een groep niet bestaat: foutmelding op scherm en in logbestand,
-    maar het script stopt niet en gaat verder met de volgende groep.
-    Bron: F. Vanhoo, "PowerShell Vlot gebruiken", 2022, hfst. 11
-    https://learn.microsoft.com/en-us/powershell/module/
-      activedirectory/add-adgroupmember
-.EXAMPLE
-    Voeg-GebruikersToeAanGroepen
-#>
-    Schrijf-Log "#### Adding users to security groups... ####"
-
-    $bestand = "$global:scriptRoot\settings\users.json"
-
-    if (-not (Test-Path $bestand)) {
-        Schrijf-Log "FOUT: users.json niet gevonden op $bestand"
-        Read-Host "Druk op ENTER om verder te gaan"
-        return
-    }
-
-    $gebruikers = (Get-Content $bestand -Raw -Encoding UTF8 | ConvertFrom-Json).users
-
-    foreach ($gebruiker in $gebruikers) {
-        $aanmelding = $gebruiker.login.Trim()
-
-        foreach ($groep in $gebruiker.securityGroups) {
-            $groep = $groep.Trim()
-
-            if (-not (Get-ADGroup -Filter "Name -eq '$groep'" -ErrorAction SilentlyContinue)) {
-                Write-Host "FOUT: Groep '$groep' bestaat niet." -ForegroundColor Red
-                Schrijf-Log "FOUT: Groep '$groep' bestaat niet voor gebruiker '$aanmelding'."
-                continue
-            }
-
-            try {
-                Add-ADGroupMember -Identity $groep -Members $aanmelding
-                Schrijf-Log "Gebruiker '$aanmelding' toegevoegd aan groep '$groep'."
-                Write-Host "Toegevoegd: $aanmelding -> $groep" -ForegroundColor Green
-            }
-            catch {
-                Schrijf-Log "FOUT: '$aanmelding' -> '$groep': $_"
-                Write-Host "FOUT: $_" -ForegroundColor Red
-            }
-        }
-    }
-
-    Schrijf-Log "#### Finished adding users to groups... ####"
-    Read-Host "Druk op ENTER om verder te gaan"
-}
-
-
-# ─────────────────────────────────────────────────────────────────────
-function Stel-RechtenIn {
-<#
-.SYNOPSIS
-    Kent NTFS- en share-rechten toe op basis van rechten.csv.
-.DESCRIPTION
-    Kolommen in rechten.csv:
-      map;share;Groep;NTFS_permission;share_permission
-    Per rij wordt gecontroleerd of de groep, share en map bestaan.
-    Niet-bestaand element geeft een foutmelding maar stopt het script
-    niet. NTFS-rechten worden erfelijk ingesteld
-    (ContainerInherit + ObjectInherit).
-    Bron: F. Vanhoo, "PowerShell Vlot gebruiken", 2022, hfst. 8
-    https://learn.microsoft.com/en-us/powershell/module/
-      smbshare/grant-smbshareaccess
-    https://learn.microsoft.com/en-us/powershell/module/
-      microsoft.powershell.security/set-acl
-.EXAMPLE
-    Stel-RechtenIn
-#>
-    Schrijf-Log "#### Setting NTFS and share permissions... ####"
-
-    $bestand = "$global:scriptRoot\settings\rechten.csv"
-
-    if (-not (Test-Path $bestand)) {
-        Schrijf-Log "FOUT: rechten.csv niet gevonden op $bestand"
-        Read-Host "Druk op ENTER om verder te gaan"
-        return
-    }
-
-    $domein = (Get-ADDomain).NetBIOSName
-    $rijen  = Import-Csv $bestand -Delimiter ";" -Encoding UTF8
-
-    foreach ($rij in $rijen) {
-        $map       = $rij.map.Trim()
-        $share     = $rij.share.Trim()
-        $groep     = $rij.Groep.Trim()
-        $ntfsRecht = $rij.NTFS_permission.Trim()
-        $shareRecht= $rij.share_permission.Trim()
-        $account   = "$domein\$groep"
-
-        # Groep controleren
-        if (-not (Get-ADGroup -Filter "Name -eq '$groep'" -ErrorAction SilentlyContinue)) {
-            Write-Host "FOUT: Groep '$groep' bestaat niet." -ForegroundColor Red
-            Schrijf-Log "FOUT: Groep '$groep' bestaat niet."
-            continue
-        }
-
-        # ── Share-rechten ─────────────────────────────────────────────────
-        if ($share -ne "") {
-            if (Get-SmbShare -Name $share -ErrorAction SilentlyContinue) {
-                # Vertaal share_permission naar SMB-toegangsniveau
-                $smbNiveau = switch ($shareRecht.ToLower()) {
-                    "read"   { "Read" }
-                    "change" { "Change" }
-                    "full"   { "Full" }
-                    default  { "Read" }
-                }
-                try {
-                    Grant-SmbShareAccess -Name $share -AccountName $account -AccessRight $smbNiveau -Force | Out-Null
-                    Schrijf-Log "Share-recht '$smbNiveau' toegekend: $account op '$share'"
-                    Write-Host "Share-recht: $account -> $share ($smbNiveau)" -ForegroundColor Green
-                }
-                catch {
-                    Schrijf-Log "FOUT bij share-recht voor '$groep' op '$share': $_"
-                    Write-Host "FOUT: $_" -ForegroundColor Red
-                }
+                Write-BESVDomainLog `
+                    -Message `
+                    "OU aangemaakt: $OU"
             }
             else {
-                Write-Host "FOUT: Share '$share' bestaat niet." -ForegroundColor Red
-                Schrijf-Log "FOUT: Share '$share' bestaat niet."
+
+                Write-Host `
+                    "OU bestaat reeds: $OU" `
+                    -ForegroundColor Yellow
             }
         }
+        catch {
 
-        # ── NTFS-rechten ──────────────────────────────────────────────────
-        if ($map -ne "") {
-            if (Test-Path $map) {
-                # Vertaal NTFS_permission naar FileSystemRights
-                # Bron: https://learn.microsoft.com/en-us/dotnet/api/
-                #         system.security.accesscontrol.filesystemrights
-                $bestandsRecht = switch ($ntfsRecht.ToLower()) {
-                    "read"   { [System.Security.AccessControl.FileSystemRights]::ReadAndExecute }
-                    "modify" { [System.Security.AccessControl.FileSystemRights]::Modify }
-                    "full"   { [System.Security.AccessControl.FileSystemRights]::FullControl }
-                    default  { [System.Security.AccessControl.FileSystemRights]::ReadAndExecute }
+            Write-Host `
+                "Fout tijdens aanmaken OU." `
+                -ForegroundColor Red
+        }
+    }
+}
+
+# ============================================================
+# FUNCTION : New-BESVSecurityGroups
+# ============================================================
+
+function New-BESVSecurityGroups {
+
+<#
+.SYNOPSIS
+Maakt security groups aan.
+
+.DESCRIPTION
+Deze functie leest securitygroups.csv
+en maakt alle groepen aan.
+
+DL_ = Domain Local
+GL_ = Global
+
+.EXAMPLE
+New-BESVSecurityGroups
+
+.NOTES
+Auteur : besv
+
+Bronnen :
+- Hfst. 79  : CSV-bestanden
+- Hfst. 129 : Active Directory
+
+#>
+
+    $Groups = `
+        Import-Csv $GroupsFile
+
+    foreach ($Group in $Groups) {
+
+        $GroupName = `
+            $Group.Name
+
+        if ($GroupName -match "^DL_") {
+
+            $Scope = "DomainLocal"
+        }
+        else {
+
+            $Scope = "Global"
+        }
+
+        try {
+
+            $Exists = `
+                Get-ADGroup `
+                -Filter "Name -eq '$GroupName'" `
+                -ErrorAction SilentlyContinue
+
+            if (-not($Exists)) {
+
+                New-ADGroup `
+                    -Name $GroupName `
+                    -GroupScope $Scope `
+                    -GroupCategory Security
+
+                Write-Host `
+                    "Group aangemaakt: $GroupName" `
+                    -ForegroundColor Green
+
+                Write-BESVDomainLog `
+                    -Message `
+                    "Group aangemaakt: $GroupName"
+            }
+        }
+        catch {
+
+            Write-Host `
+                "Fout tijdens group creatie." `
+                -ForegroundColor Red
+        }
+    }
+}
+
+# ============================================================
+# FUNCTION : New-BESVUsers
+# ============================================================
+
+function New-BESVUsers {
+
+<#
+.SYNOPSIS
+Maakt domain users aan.
+
+.DESCRIPTION
+Deze functie leest users.json
+en maakt alle gebruikers aan.
+
+.EXAMPLE
+New-BESVUsers
+
+.NOTES
+Auteur : besv
+
+Bronnen :
+- Hfst. 81  : JSON-bestanden
+- Hfst. 129 : Active Directory
+
+#>
+
+    [xml]$Settings = `
+        Get-Content $DomainSettingsFile
+
+    $Password = `
+        $Settings.Settings.UserSettings.defaultPassword
+
+    $SecurePassword = `
+        ConvertTo-SecureString `
+        $Password `
+        -AsPlainText `
+        -Force
+
+    $Users = `
+        (Get-Content $UsersFile -Raw |
+        ConvertFrom-Json).users
+
+    $DomainName = `
+        $Settings.Settings.Domain.domainname
+
+    $DomainName = `
+        $DomainName.Replace("xxx","besv")
+
+    foreach ($User in $Users) {
+
+        $DisplayName = `
+            "$($User.firstName) $($User.lastName)"
+
+        try {
+
+            $Exists = `
+                Get-ADUser `
+                -Filter "SamAccountName -eq '$($User.login)'" `
+                -ErrorAction SilentlyContinue
+
+            if (-not($Exists)) {
+
+                New-ADUser `
+                    -Name $DisplayName `
+                    -GivenName $User.firstName `
+                    -Surname $User.lastName `
+                    -SamAccountName $User.login `
+                    -UserPrincipalName `
+                    "$($User.login)@$DomainName" `
+                    -AccountPassword $SecurePassword `
+                    -Enabled $true
+
+                Write-Host `
+                    "User aangemaakt: $DisplayName" `
+                    -ForegroundColor Green
+
+                Write-BESVDomainLog `
+                    -Message `
+                    "User aangemaakt: $DisplayName"
+            }
+            else {
+
+                Write-Host `
+                    "User bestaat reeds: $DisplayName" `
+                    -ForegroundColor Yellow
+            }
+        }
+        catch {
+
+            Write-Host `
+                "Fout tijdens user creatie." `
+                -ForegroundColor Red
+        }
+    }
+}
+
+# ============================================================
+# FUNCTION : Add-BESVUsersToGroups
+# ============================================================
+
+function Add-BESVUsersToGroups {
+
+<#
+.SYNOPSIS
+Voegt users toe aan groups.
+
+.DESCRIPTION
+Deze functie leest users.json
+en voegt gebruikers toe aan de juiste groups.
+
+.EXAMPLE
+Add-BESVUsersToGroups
+
+.NOTES
+Auteur : besv
+
+Bronnen :
+- Hfst. 81  : JSON-bestanden
+- Hfst. 129 : Active Directory
+
+#>
+
+    $Users = `
+        (Get-Content $UsersFile -Raw |
+        ConvertFrom-Json).users
+
+    foreach ($User in $Users) {
+
+        foreach ($Group in $User.securityGroups) {
+
+            try {
+
+                $GroupExists = `
+                    Get-ADGroup `
+                    -Filter "Name -eq '$Group'" `
+                    -ErrorAction SilentlyContinue
+
+                if ($GroupExists) {
+
+                    Add-ADGroupMember `
+                        -Identity $Group `
+                        -Members $User.login `
+                        -ErrorAction Stop
+
+                    Write-Host `
+                        "$($User.login) toegevoegd aan $Group" `
+                        -ForegroundColor Green
+
+                    Write-BESVDomainLog `
+                        -Message `
+                        "$($User.login) toegevoegd aan $Group"
                 }
-                try {
-                    $acl        = Get-Acl $map
-                    $toegangsRegel = New-Object System.Security.AccessControl.FileSystemAccessRule(
-                        $account,
-                        $bestandsRecht,
+                else {
+
+                    Write-Host `
+                        "Group bestaat niet: $Group" `
+                        -ForegroundColor Yellow
+                }
+            }
+            catch {
+
+                Write-Host `
+                    "Fout tijdens toevoegen group." `
+                    -ForegroundColor Red
+            }
+        }
+    }
+}
+
+# ============================================================
+# FUNCTION : New-BESVFolders
+# ============================================================
+
+function New-BESVFolders {
+
+<#
+.SYNOPSIS
+Maakt folderstructuur aan.
+
+.DESCRIPTION
+Deze functie leest mappen.txt
+en maakt folders aan.
+
+.EXAMPLE
+New-BESVFolders
+
+.NOTES
+Auteur : besv
+
+Bronnen :
+- Hfst. 71
+- Hfst. 79
+
+#>
+
+    $Folders = `
+        Get-Content $FoldersFile
+
+    foreach ($Folder in $Folders) {
+
+        try {
+
+            if (-not(Test-Path $Folder)) {
+
+                New-Item `
+                    -Path $Folder `
+                    -ItemType Directory `
+                    -Force | Out-Null
+
+                Write-Host `
+                    "Folder aangemaakt: $Folder" `
+                    -ForegroundColor Green
+
+                Write-BESVDomainLog `
+                    -Message `
+                    "Folder aangemaakt: $Folder"
+            }
+            else {
+
+                Write-Host `
+                    "Folder bestaat reeds: $Folder" `
+                    -ForegroundColor Yellow
+            }
+        }
+        catch {
+
+            Write-Host `
+                "Fout tijdens folder creatie." `
+                -ForegroundColor Red
+        }
+    }
+}
+
+# ============================================================
+# FUNCTION : New-BESVShares
+# ============================================================
+
+function New-BESVShares {
+
+<#
+.SYNOPSIS
+Maakt SMB shares aan.
+
+.DESCRIPTION
+Deze functie leest shares.csv
+en maakt SMB shares aan.
+
+.EXAMPLE
+New-BESVShares
+
+.NOTES
+Auteur : besv
+
+Bronnen :
+- Hfst. 79
+- Hfst. 129
+
+Microsoft Learn:
+New-SmbShare
+
+#>
+
+    $Shares = `
+        Import-Csv $SharesFile
+
+    foreach ($Share in $Shares) {
+
+        try {
+
+            if (-not(Test-Path $Share.Path)) {
+
+                New-Item `
+                    -Path $Share.Path `
+                    -ItemType Directory `
+                    -Force | Out-Null
+            }
+
+            $Exists = `
+                Get-SmbShare `
+                -Name $Share.Name `
+                -ErrorAction SilentlyContinue
+
+            if (-not($Exists)) {
+
+                New-SmbShare `
+                    -Name $Share.Name `
+                    -Path $Share.Path `
+                    -FullAccess "Everyone"
+
+                Write-Host `
+                    "Share aangemaakt: $($Share.Name)" `
+                    -ForegroundColor Green
+
+                Write-BESVDomainLog `
+                    -Message `
+                    "Share aangemaakt: $($Share.Name)"
+            }
+        }
+        catch {
+
+            Write-Host `
+                "Fout tijdens share creatie." `
+                -ForegroundColor Red
+        }
+    }
+}
+
+# ============================================================
+# FUNCTION : Set-BESVPermissions
+# ============================================================
+
+function Set-BESVPermissions {
+
+<#
+.SYNOPSIS
+Stelt NTFS rechten in.
+
+.DESCRIPTION
+Deze functie leest rechten.csv
+en configureert NTFS rechten.
+
+.EXAMPLE
+Set-BESVPermissions
+
+.NOTES
+Auteur : besv
+
+Bronnen :
+- Hfst. 129
+- Hfst. 149
+- Hfst. 151
+
+Microsoft Learn:
+Set-Acl
+
+#>
+
+    $Rights = `
+        Import-Csv $RightsFile
+
+    foreach ($Right in $Rights) {
+
+        try {
+
+            if (Test-Path $Right.Path) {
+
+                $Acl = `
+                    Get-Acl $Right.Path
+
+                $AccessRule = `
+                    New-Object `
+                    System.Security.AccessControl.FileSystemAccessRule(
+                        $Right.Group,
+                        $Right.Permission,
                         "ContainerInherit,ObjectInherit",
                         "None",
                         "Allow"
                     )
-                    $acl.SetAccessRule($toegangsRegel)
-                    Set-Acl -Path $map -AclObject $acl
-                    Schrijf-Log "NTFS-recht '$ntfsRecht' toegekend: $account op '$map'"
-                    Write-Host "NTFS-recht: $account -> $map ($ntfsRecht)" -ForegroundColor Green
-                }
-                catch {
-                    Schrijf-Log "FOUT bij NTFS-recht voor '$groep' op '$map': $_"
-                    Write-Host "FOUT: $_" -ForegroundColor Red
-                }
+
+                $Acl.AddAccessRule($AccessRule)
+
+                Set-Acl `
+                    -Path $Right.Path `
+                    -AclObject $Acl
+
+                Write-Host `
+                    "NTFS rechten ingesteld op $($Right.Path)" `
+                    -ForegroundColor Green
+
+                Write-BESVDomainLog `
+                    -Message `
+                    "NTFS rechten ingesteld op $($Right.Path)"
             }
             else {
-                Write-Host "FOUT: Map '$map' bestaat niet." -ForegroundColor Red
-                Schrijf-Log "FOUT: Map '$map' bestaat niet."
+
+                Write-Host `
+                    "Pad bestaat niet: $($Right.Path)" `
+                    -ForegroundColor Yellow
             }
         }
-    }
+        catch {
 
-    Schrijf-Log "#### Finished setting permissions... ####"
-    Read-Host "Druk op ENTER om verder te gaan"
+            Write-Host `
+                "Fout tijdens NTFS configuratie." `
+                -ForegroundColor Red
+        }
+    }
 }
+
+# ============================================================
+# EXPORT FUNCTIONS
+# ============================================================
+
+Export-ModuleMember -Function *

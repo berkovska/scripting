@@ -1,344 +1,688 @@
-# ============================================================
-# Auteur  : xxx
-# Bestand : algemeenxxx.psm1
-# Doel    : Basisconfiguratie van Windows apparaten:
-#           logging, computernaam, netwerk, mappen, shares
+﻿# ============================================================
+# Auteur  : besv
+# Bestand : algemeenbesv.psm1
+# Doel    : Algemene configuratiefuncties voor:
+#           - Windows Server 2025
+#           - Windows 11 client
+#           - netwerkconfiguratie
+#           - logging
+#           - computernaam
+#           - VMware netwerkadapters
+#
+# Beschrijving :
+# Deze module bevat alle basisfuncties die nodig zijn
+# voor de initiële configuratie van server en client.
 #
 # Bronnen :
-#   F. Vanhoo, "PowerShell Vlot gebruiken", Die Keure, 2022/2025
-#     - Hoofdstuk 4  : Functies en modules
-#     - Hoofdstuk 6  : Werken met bestanden en mappen
-#     - Hoofdstuk 9  : Registry en systeembeheer
-#   https://learn.microsoft.com/en-us/powershell/module/
-#     microsoft.powershell.management/rename-computer
-#   https://learn.microsoft.com/en-us/powershell/module/
-#     nettcpip/new-netipaddress
-#   https://learn.microsoft.com/en-us/powershell/module/
-#     smbshare/new-smbshare
+#
+# Boek:
+#   F. Vanhoo,
+#   "PowerShell Vlot gebruiken",
+#   Die Keure, tweede editie, 2022/2025
+#
+#   Gebruikte hoofdstukken:
+#   - Hfst. 24  : PowerShell automatisch starten
+#   - Hfst. 41  : Modules in PowerShell
+#   - Hfst. 71  : Methoden, functies en cmdlets
+#   - Hfst. 79  : CSV-bestanden
+#   - Hfst. 80  : XML-bestanden
+#   - Hfst. 83  : Where-Object
+#   - Hfst. 107 : WMI
+#   - Hfst. 108 : CIM-variabelen
+#   - Hfst. 138 : Scripts en modules
+#   - Hfst. 144 : Scripts, modules en functies opbouwen
+#   - Hfst. 149 : Fouten opvangen
+#   - Hfst. 151 : Try, catch en finally
+#
+# Microsoft Learn:
+#   https://learn.microsoft.com/en-us/powershell/
+#
 # ============================================================
 
+# ============================================================
+# VARIABELEN
+# ============================================================
 
-# ─────────────────────────────────────────────────────────────────────
-function Schrijf-Log {
+$ScriptRoot = Split-Path `
+    -Parent `
+    $PSScriptRoot
+
+$ComputerSettingsFile = `
+    "$ScriptRoot\settings\Computer.Settings.xml"
+
+$LogFolder = `
+    "$ScriptRoot\logs"
+
+$LogFile = `
+    "$LogFolder\InstallatieLogbesv.txt"
+
+# ============================================================
+# FUNCTION : Write-BESVGeneralLog
+# ============================================================
+
+function Write-BESVGeneralLog {
+
 <#
 .SYNOPSIS
-    Schrijft een bericht met tijdstempel naar het logbestand.
+Schrijft meldingen weg naar logbestand.
+
 .DESCRIPTION
-    Elke loginstelling begint met datum en uur in het formaat
-    "dd-MM-yyyy HH:mm:ss". Het bericht wordt ook op het scherm
-    getoond. Map en bestand worden aangemaakt als ze niet bestaan.
-    Bron: F. Vanhoo, "PowerShell Vlot gebruiken", 2022, hfst. 6
-.PARAMETER Bericht
-    De tekst die gelogd moet worden.
+Deze functie schrijft informatie weg naar het
+centrale logbestand van het scriptingproject.
+
+Elke regel bevat:
+- datum
+- tijdstip
+- melding
+
 .EXAMPLE
-    Schrijf-Log "Computernaam gewijzigd naar dc01xxx"
-    # Uitvoer: 22-04-2026 14:05:01 - Computernaam gewijzigd naar dc01xxx
+Write-BESVGeneralLog -Message "Server gestart"
+
+.NOTES
+Auteur : besv
+
+Bestand :
+algemeenbesv.psm1
+
+Bronnen :
+
+F. Vanhoo,
+"PowerShell Vlot gebruiken"
+
+- Hfst. 71  : Methoden, functies en cmdlets
+- Hfst. 144 : Scripts, modules en functies opbouwen
+
+Microsoft Learn:
+https://learn.microsoft.com/en-us/powershell/
+
+Out-File:
+https://learn.microsoft.com/en-us/powershell/module/
+microsoft.powershell.utility/out-file
+
 #>
+
     param(
-        [Parameter(Mandatory = $true)]
-        [string]$Bericht
+        [string]$Message
     )
 
-    $tijdstempel = Get-Date -Format "dd-MM-yyyy HH:mm:ss"
-    $logRegel    = "$tijdstempel - $Bericht"
+    if (-not(Test-Path $LogFolder)) {
 
-    # Logmap aanmaken als die nog niet bestaat
-    # Bron: F. Vanhoo, 2022, p. 133 – New-Item
-    $logMap = Split-Path $global:logBestand -Parent
-    if (-not (Test-Path $logMap)) {
-        New-Item -ItemType Directory -Path $logMap -Force | Out-Null
+        New-Item `
+            -Path $LogFolder `
+            -ItemType Directory `
+            -Force | Out-Null
     }
 
-    Add-Content -Path $global:logBestand -Value $logRegel -Encoding UTF8
-    Write-Host $logRegel
+    $CurrentDate = `
+        Get-Date -Format "dd-MM-yyyy HH:mm:ss"
+
+    "$CurrentDate - $Message" |
+        Out-File `
+        -FilePath $LogFile `
+        -Append
 }
 
+# ============================================================
+# FUNCTION : Import-BESVXMLSettings
+# ============================================================
 
-# ─────────────────────────────────────────────────────────────────────
-function Haal-ComputerInstellingenOp {
+function Import-BESVXMLSettings {
+
 <#
 .SYNOPSIS
-    Laadt Computer.Settings.xml en geeft het XML-object terug.
-.DESCRIPTION
-    Zoekt het bestand in de map \scripting\settings\.
-    Geeft een foutmelding als het bestand niet gevonden wordt.
-    Bron: F. Vanhoo, "PowerShell Vlot gebruiken", 2022, hfst. 7
-.EXAMPLE
-    $xml = Haal-ComputerInstellingenOp
-    $xml.Settings.name
-#>
-    $pad = "$global:scriptRoot\settings\Computer.Settings.xml"
+Leest XML configuratiebestand in.
 
-    if (-not (Test-Path $pad)) {
-        Schrijf-Log "FOUT: Computer.Settings.xml niet gevonden op $pad"
-        throw "Bestand niet gevonden: $pad"
+.DESCRIPTION
+Deze functie leest het XML-bestand in waarin
+de netwerkconfiguratie van de machine staat.
+
+Het bestand bevat:
+- hostname
+- adapters
+- IP adressen
+- DNS
+- gateway
+- DHCP instellingen
+
+.EXAMPLE
+Import-BESVXMLSettings
+
+.NOTES
+Auteur : besv
+
+Bestand :
+algemeenbesv.psm1
+
+Bronnen :
+
+F. Vanhoo,
+"PowerShell Vlot gebruiken"
+
+- Hfst. 80 : XML-bestanden
+- Hfst. 71 : Methoden, functies en cmdlets
+
+Microsoft Learn:
+https://learn.microsoft.com/en-us/powershell/
+
+about_Xml:
+https://learn.microsoft.com/en-us/powershell/module/
+microsoft.powershell.utility/import-clixml
+
+#>
+
+    try {
+
+        [xml]$Settings = `
+            Get-Content $ComputerSettingsFile
+
+        Write-BESVGeneralLog `
+            -Message "XML instellingen geladen"
+
+        return $Settings
     }
+    catch {
 
-    return [xml](Get-Content $pad -Encoding UTF8)
+        Write-Host ""
+        Write-Host `
+            "Fout bij laden XML instellingen." `
+            -ForegroundColor Red
+
+        Write-BESVGeneralLog `
+            -Message "Fout bij laden XML instellingen"
+
+        return $null
+    }
 }
 
+# ============================================================
+# FUNCTION : Set-BESVHostname
+# ============================================================
 
-# ─────────────────────────────────────────────────────────────────────
-function Stel-ComputernaamIn {
+function Set-BESVHostname {
+
 <#
 .SYNOPSIS
-    Stelt de computernaam in en zorgt voor automatische herstart
-    met hervatting van het script nadien.
+Wijzigt computernaam.
+
 .DESCRIPTION
-    Vraagt de gebruiker om een nieuwe computernaam en autologon-
-    credentials. Slaat de autologon op via de Winlogon registry-
-    sleutel zodat Windows na herstart automatisch aanmeldt.
-    Configureert RunOnce zodat het script na herstart hervat wordt.
-    Bron: F. Vanhoo, "PowerShell Vlot gebruiken", 2022, hfst. 9
-    Registry-sleutels:
-      HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon
-      HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce
-    https://learn.microsoft.com/en-us/powershell/module/
-      microsoft.powershell.management/rename-computer
-.PARAMETER ComputerType
-    "Server" of "Client" – enkel voor de logmelding.
+Deze functie leest de hostname uit het XML-bestand
+en wijzigt de computernaam.
+
+xxx wordt automatisch vervangen door besv.
+
 .EXAMPLE
-    Stel-ComputernaamIn -ComputerType "Server"
-.EXAMPLE
-    Stel-ComputernaamIn -ComputerType "Client"
+Set-BESVHostname
+
+.NOTES
+Auteur : besv
+
+Bestand :
+algemeenbesv.psm1
+
+Bronnen :
+
+F. Vanhoo,
+"PowerShell Vlot gebruiken"
+
+- Hfst. 71  : Methoden, functies en cmdlets
+- Hfst. 107 : WMI
+- Hfst. 149 : Fouten opvangen
+
+Microsoft Learn:
+https://learn.microsoft.com/en-us/powershell/
+
+Rename-Computer:
+https://learn.microsoft.com/en-us/powershell/module/
+microsoft.powershell.management/rename-computer
+
 #>
-    param(
-        [Parameter(Mandatory = $true)]
-        [ValidateSet("Server","Client")]
-        [string]$ComputerType
-    )
 
-    $nieuweNaam = Read-Host "Geef de nieuwe computernaam op"
+    $Settings = `
+        Import-BESVXMLSettings
 
-    if ([string]::IsNullOrWhiteSpace($nieuweNaam)) {
-        Write-Host "Geen naam opgegeven. Actie geannuleerd." -ForegroundColor Red
-        Read-Host "Druk op ENTER om verder te gaan"
+    if ($null -eq $Settings) {
+
         return
     }
 
-    # Credentials opvragen voor automatisch aanmelden na herstart
-    # Bron: https://learn.microsoft.com/en-us/powershell/module/
-    #         microsoft.powershell.security/get-credential
-    $aanmeldgegevens = Get-Credential -Message "Account voor automatisch aanmelden na herstart"
+    $ComputerName = `
+        $Settings.Settings.name
 
-    # Autologon instellen via Winlogon
-    # Bron: https://learn.microsoft.com/en-us/troubleshoot/windows-server/
-    #         user-profiles-and-logon/turn-on-automatic-logon
-    $winlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
-    Set-ItemProperty -Path $winlogon -Name "AutoAdminLogon"    -Value "1"
-    Set-ItemProperty -Path $winlogon -Name "DefaultUsername"   -Value $aanmeldgegevens.UserName
-    Set-ItemProperty -Path $winlogon -Name "DefaultPassword"   -Value ($aanmeldgegevens.GetNetworkCredential().Password)
-    Set-ItemProperty -Path $winlogon -Name "DefaultDomainName" -Value $env:COMPUTERNAME
+    $ComputerName = `
+        $ComputerName.Replace("xxx","besv")
 
-    # Script hervatten na herstart via RunOnce
-    # Bron: https://learn.microsoft.com/en-us/windows/win32/setupapi/
-    #         run-and-runonce-registry-keys
-    $runOnce = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce"
-    Set-ItemProperty -Path $runOnce -Name "HervatScript" `
-        -Value "powershell.exe -ExecutionPolicy Bypass -File `"$global:scriptRoot\Menuxxx.ps1`""
-
-    Schrijf-Log "#### Start computernaam instellen ($ComputerType)... ####"
+    Write-Host ""
+    Write-Host `
+        "Computernaam wijzigen naar $ComputerName" `
+        -ForegroundColor Cyan
 
     try {
-        Rename-Computer -NewName $nieuweNaam -Force
-        Schrijf-Log "Computernaam gewijzigd naar: $nieuweNaam"
-        Write-Host "Systeem wordt herstart in 3 seconden..." -ForegroundColor Yellow
-        Start-Sleep 3
-        Restart-Computer -Force
+
+        Rename-Computer `
+            -NewName $ComputerName `
+            -Force
+
+        Write-BESVGeneralLog `
+            -Message `
+            "Computernaam gewijzigd naar $ComputerName"
+
+        Write-Host `
+            "Computernaam succesvol gewijzigd." `
+            -ForegroundColor Green
     }
     catch {
-        Schrijf-Log "FOUT bij hernoemen: $_"
-        Write-Host "FOUT: $_" -ForegroundColor Red
-        Read-Host "Druk op ENTER om verder te gaan"
+
+        Write-Host `
+            "Fout bij wijzigen computernaam." `
+            -ForegroundColor Red
+
+        Write-BESVGeneralLog `
+            -Message `
+            "Fout bij wijzigen computernaam"
     }
 }
 
+# ============================================================
+# FUNCTION : Set-BESVNetworkAdapters
+# ============================================================
 
-# ─────────────────────────────────────────────────────────────────────
-function Stel-NetwerkconfigIn {
+function Set-BESVNetworkAdapters {
+
 <#
 .SYNOPSIS
-    Stelt de IP-configuratie in op basis van Computer.Settings.xml.
+Hernoemt netwerkadapters.
+
 .DESCRIPTION
-    Leest alle netwerkadapters uit het XML-bestand. Per adapter
-    wordt op basis van het MAC-adres de bijhorende netwerkkaart
-    opgezocht. DHCP wordt in- of uitgeschakeld op basis van
-    dhcpenabled. Bij statisch IP worden IP-adres, subnetmasker,
-    gateway en DNS ingesteld. Alle wijzigingen worden gelogd.
-    Bron: F. Vanhoo, "PowerShell Vlot gebruiken", 2022, hfst. 7
-    https://learn.microsoft.com/en-us/powershell/module/
-      nettcpip/new-netipaddress
-    https://learn.microsoft.com/en-us/powershell/module/
-      dnsclient/set-dnsclientserveraddress
+Deze functie zoekt netwerkadapters op basis van
+MAC-address en hernoemt deze volgens de XML
+configuratie.
+
+Geschikt voor VMware adapters.
+
 .EXAMPLE
-    Stel-NetwerkconfigIn
+Set-BESVNetworkAdapters
+
+.NOTES
+Auteur : besv
+
+Bestand :
+algemeenbesv.psm1
+
+Bronnen :
+
+F. Vanhoo,
+"PowerShell Vlot gebruiken"
+
+- Hfst. 83  : Where-Object
+- Hfst. 107 : WMI
+- Hfst. 108 : CIM-variabelen
+- Hfst. 149 : Fouten opvangen
+
+Microsoft Learn:
+https://learn.microsoft.com/en-us/powershell/
+
+Get-NetAdapter:
+https://learn.microsoft.com/en-us/powershell/module/
+netadapter/get-netadapter
+
+Rename-NetAdapter:
+https://learn.microsoft.com/en-us/powershell/module/
+netadapter/rename-netadapter
+
 #>
-    Schrijf-Log "#### Start IP-configuratie via XML... ####"
 
-    try {
-        $xml = Haal-ComputerInstellingenOp
+    $Settings = `
+        Import-BESVXMLSettings
 
-        foreach ($adapter in $xml.Settings.networksettings.networkadapter) {
+    foreach ($Adapter in $Settings.Settings.networksettings.networkadapter) {
 
-            # Adapter opzoeken via MAC-adres
-            # Bron: https://learn.microsoft.com/en-us/powershell/module/
-            #         netadapter/get-netadapter
-            $netwerkkaart = Get-NetAdapter | Where-Object { $_.MacAddress -eq $adapter.macaddress }
+        $MacAddress = `
+            $Adapter.macaddress.Replace("-",":")
 
-            if (-not $netwerkkaart) {
-                Schrijf-Log "WAARSCHUWING: Geen adapter gevonden met MAC $($adapter.macaddress)"
-                Write-Host "WAARSCHUWING: Adapter met MAC $($adapter.macaddress) niet gevonden." -ForegroundColor Yellow
-                continue
+        $AdapterName = `
+            $Adapter.name
+
+        $NetworkCard = `
+            Get-NetAdapter | Where-Object {
+
+                $_.MacAddress -eq $MacAddress
             }
 
-            if ($adapter.dhcpenabled -eq "true") {
-                # DHCP inschakelen
-                Set-NetIPInterface -InterfaceAlias $netwerkkaart.Name -Dhcp Enabled
-                Set-DnsClientServerAddress -InterfaceAlias $netwerkkaart.Name -ResetServerAddresses
-                Schrijf-Log "Adapter '$($netwerkkaart.Name)' ingesteld op DHCP."
+        if ($null -ne $NetworkCard) {
+
+            try {
+
+                Rename-NetAdapter `
+                    -Name $NetworkCard.Name `
+                    -NewName $AdapterName `
+                    -Confirm:$false
+
+                Write-Host `
+                    "Adapter hernoemd naar $AdapterName" `
+                    -ForegroundColor Green
+
+                Write-BESVGeneralLog `
+                    -Message `
+                    "Adapter hernoemd naar $AdapterName"
+            }
+            catch {
+
+                Write-Host `
+                    "Fout bij hernoemen adapter." `
+                    -ForegroundColor Red
+
+                Write-BESVGeneralLog `
+                    -Message `
+                    "Fout bij hernoemen adapter"
+            }
+        }
+        else {
+
+            Write-Host `
+                "Adapter met MAC $MacAddress niet gevonden." `
+                -ForegroundColor Yellow
+        }
+    }
+}
+
+# ============================================================
+# FUNCTION : Set-BESVStaticIP
+# ============================================================
+
+function Set-BESVStaticIP {
+
+<#
+.SYNOPSIS
+Configureert IP instellingen.
+
+.DESCRIPTION
+Deze functie configureert:
+- DHCP
+- statisch IP
+- gateway
+- DNS
+
+volgens het XML configuratiebestand.
+
+.EXAMPLE
+Set-BESVStaticIP
+
+.NOTES
+Auteur : besv
+
+Bestand :
+algemeenbesv.psm1
+
+Bronnen :
+
+F. Vanhoo,
+"PowerShell Vlot gebruiken"
+
+- Hfst. 80  : XML-bestanden
+- Hfst. 83  : Where-Object
+- Hfst. 107 : WMI
+- Hfst. 149 : Fouten opvangen
+- Hfst. 151 : Try, catch en finally
+
+Microsoft Learn:
+https://learn.microsoft.com/en-us/powershell/
+
+New-NetIPAddress:
+https://learn.microsoft.com/en-us/powershell/module/
+nettcpip/new-netipaddress
+
+Set-DnsClientServerAddress:
+https://learn.microsoft.com/en-us/powershell/module/
+dnsclient/set-dnsclientserveraddress
+
+#>
+
+    $Settings = `
+        Import-BESVXMLSettings
+
+    foreach ($Adapter in $Settings.Settings.networksettings.networkadapter) {
+
+        $AdapterName = `
+            $Adapter.name
+
+        $DhcpEnabled = `
+            $Adapter.dhcpenabled
+
+        Write-Host ""
+        Write-Host `
+            "Configuratie adapter $AdapterName" `
+            -ForegroundColor Cyan
+
+        try {
+
+            if ($DhcpEnabled -eq "true") {
+
+                Set-NetIPInterface `
+                    -InterfaceAlias $AdapterName `
+                    -Dhcp Enabled
+
+                Set-DnsClientServerAddress `
+                    -InterfaceAlias $AdapterName `
+                    -ResetServerAddresses
+
+                Write-Host `
+                    "DHCP ingeschakeld op $AdapterName" `
+                    -ForegroundColor Green
+
+                Write-BESVGeneralLog `
+                    -Message `
+                    "DHCP ingeschakeld op $AdapterName"
             }
             else {
-                # Bestaande IP-configuratie verwijderen
-                Get-NetIPAddress -InterfaceAlias $netwerkkaart.Name -ErrorAction SilentlyContinue |
-                    Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
-                Get-NetRoute -InterfaceAlias $netwerkkaart.Name -ErrorAction SilentlyContinue |
-                    Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
 
-                # Statisch IP-adres instellen
                 New-NetIPAddress `
-                    -InterfaceAlias $netwerkkaart.Name `
-                    -IPAddress      $adapter.ip `
-                    -PrefixLength   ([int]$adapter.prefixlength) `
-                    -DefaultGateway $adapter.gateway | Out-Null
+                    -InterfaceAlias $AdapterName `
+                    -IPAddress $Adapter.ip `
+                    -PrefixLength $Adapter.prefixlength `
+                    -DefaultGateway $Adapter.gateway `
+                    -ErrorAction SilentlyContinue
 
-                # DNS instellen
                 Set-DnsClientServerAddress `
-                    -InterfaceAlias  $netwerkkaart.Name `
-                    -ServerAddresses ($adapter.dns -split ',')
+                    -InterfaceAlias $AdapterName `
+                    -ServerAddresses $Adapter.dns
 
-                Schrijf-Log "Adapter '$($netwerkkaart.Name)': IP=$($adapter.ip), GW=$($adapter.gateway), DNS=$($adapter.dns)"
-                Write-Host "#### Finished setting ip config... ####" -ForegroundColor Green
+                Write-Host `
+                    "Statisch IP ingesteld op $AdapterName" `
+                    -ForegroundColor Green
+
+                Write-BESVGeneralLog `
+                    -Message `
+                    "Statisch IP ingesteld op $AdapterName"
             }
         }
-    }
-    catch {
-        Schrijf-Log "FOUT bij IP-configuratie: $_"
-        Write-Host "FOUT: $_" -ForegroundColor Red
-    }
+        catch {
 
-    Schrijf-Log "#### Finished IP-configuratie... ####"
-    Read-Host "Druk op ENTER om verder te gaan"
+            Write-Host `
+                "Fout tijdens netwerkconfiguratie." `
+                -ForegroundColor Red
+
+            Write-BESVGeneralLog `
+                -Message `
+                "Fout tijdens netwerkconfiguratie"
+        }
+    }
 }
 
+# ============================================================
+# FUNCTION : Restart-BESVComputer
+# ============================================================
 
-# ─────────────────────────────────────────────────────────────────────
-function Maak-MappensctructuurAan {
+function Restart-BESVComputer {
+
 <#
 .SYNOPSIS
-    Maakt een mappenstructuur aan op basis van mappen.txt.
+Herstart computer.
+
 .DESCRIPTION
-    Elke niet-lege regel in mappen.txt is een volledig mappad.
-    Bestaande mappen worden gemeld maar niet overschreven.
-    Ontbrekende bovenliggende mappen worden automatisch aangemaakt
-    via de -Force parameter van New-Item.
-    Bron: F. Vanhoo, "PowerShell Vlot gebruiken", 2022, hfst. 6
-    https://learn.microsoft.com/en-us/powershell/module/
-      microsoft.powershell.management/new-item
+Deze functie herstart de computer nadat
+belangrijke configuraties uitgevoerd zijn.
+
 .EXAMPLE
-    Maak-MappensctructuurAan
+Restart-BESVComputer
+
+.NOTES
+Auteur : besv
+
+Bestand :
+algemeenbesv.psm1
+
+Bronnen :
+
+F. Vanhoo,
+"PowerShell Vlot gebruiken"
+
+- Hfst. 149 : Fouten opvangen
+
+Microsoft Learn:
+https://learn.microsoft.com/en-us/powershell/
+
+Restart-Computer:
+https://learn.microsoft.com/en-us/powershell/module/
+microsoft.powershell.management/restart-computer
+
 #>
-    Schrijf-Log "#### Creating folders... ####"
 
-    $bestand = "$global:scriptRoot\settings\mappen.txt"
+    Write-Host ""
+    Write-Host `
+        "Computer zal herstarten binnen 10 seconden..." `
+        -ForegroundColor Yellow
 
-    if (-not (Test-Path $bestand)) {
-        Schrijf-Log "FOUT: mappen.txt niet gevonden op $bestand"
-        Read-Host "Druk op ENTER om verder te gaan"
-        return
-    }
+    Start-Sleep -Seconds 10
 
-    $regels = Get-Content $bestand -Encoding UTF8 | Where-Object { $_ -notmatch '^\s*$' }
-
-    foreach ($pad in $regels) {
-        $pad = $pad.Trim()
-
-        if (Test-Path $pad) {
-            Write-Host "Map bestaat al: $pad" -ForegroundColor Yellow
-            Schrijf-Log "Map bestaat reeds: $pad"
-        }
-        else {
-            try {
-                New-Item -ItemType Directory -Path $pad -Force | Out-Null
-                Schrijf-Log "Map aangemaakt: $pad"
-                Write-Host "Map aangemaakt: $pad" -ForegroundColor Green
-            }
-            catch {
-                Schrijf-Log "FOUT bij aanmaken map $pad : $_"
-                Write-Host "FOUT: $_" -ForegroundColor Red
-            }
-        }
-    }
-
-    Schrijf-Log "#### Finished creating folders... ####"
-    Read-Host "Druk op ENTER om verder te gaan"
+    Restart-Computer -Force
 }
 
+# ============================================================
+# FUNCTION : Set-ServerConfiguration
+# ============================================================
 
-# ─────────────────────────────────────────────────────────────────────
-function Maak-SharesAan {
+function Set-ServerConfiguration {
+
 <#
 .SYNOPSIS
-    Maakt netwerkshares aan op basis van shares.csv.
+Voert serverconfiguratie uit.
+
 .DESCRIPTION
-    Kolommen in shares.csv: map;share
-    Als de opgegeven map niet bestaat, wordt ze eerst aangemaakt.
-    Als de share al bestaat, wordt een melding getoond maar stopt
-    het script niet.
-    Bron: F. Vanhoo, "PowerShell Vlot gebruiken", 2022, hfst. 8
-    https://learn.microsoft.com/en-us/powershell/module/
-      smbshare/new-smbshare
+Deze functie voert de volledige basisconfiguratie
+uit voor Windows Server.
+
+De configuratie bevat:
+- hostname
+- netwerkadapters
+- IP configuratie
+
 .EXAMPLE
-    Maak-SharesAan
+Set-ServerConfiguration
+
+.NOTES
+Auteur : besv
+
+Bestand :
+algemeenbesv.psm1
+
+Bronnen :
+
+F. Vanhoo,
+"PowerShell Vlot gebruiken"
+
+- Hfst. 138 : Scripts en modules
+- Hfst. 144 : Scripts, modules en functies opbouwen
+- Hfst. 151 : Try, catch en finally
+
+Microsoft Learn:
+https://learn.microsoft.com/en-us/powershell/
+
 #>
-    Schrijf-Log "#### Creating shares... ####"
 
-    $bestand = "$global:scriptRoot\settings\shares.csv"
+    Write-Host ""
+    Write-Host `
+        "Start serverconfiguratie..." `
+        -ForegroundColor Cyan
 
-    if (-not (Test-Path $bestand)) {
-        Schrijf-Log "FOUT: shares.csv niet gevonden op $bestand"
-        Read-Host "Druk op ENTER om verder te gaan"
-        return
-    }
+    Write-BESVGeneralLog `
+        -Message "Serverconfiguratie gestart"
 
-    $rijen = Import-Csv $bestand -Delimiter ";" -Encoding UTF8
+    Set-BESVHostname
 
-    foreach ($rij in $rijen) {
-        $pad       = $rij.map.Trim()
-        $shareNaam = $rij.share.Trim()
+    Set-BESVNetworkAdapters
 
-        # Map aanmaken als die niet bestaat
-        if (-not (Test-Path $pad)) {
-            New-Item -ItemType Directory -Path $pad -Force | Out-Null
-            Schrijf-Log "Map aangemaakt voor share '$shareNaam': $pad"
-        }
+    Set-BESVStaticIP
 
-        if (Get-SmbShare -Name $shareNaam -ErrorAction SilentlyContinue) {
-            Write-Host "Share bestaat al: $shareNaam" -ForegroundColor Yellow
-            Schrijf-Log "Share bestaat reeds: $shareNaam"
-        }
-        else {
-            try {
-                New-SmbShare -Name $shareNaam -Path $pad -FullAccess "Everyone" | Out-Null
-                Schrijf-Log "Share aangemaakt: $shareNaam -> $pad"
-                Write-Host "Share aangemaakt: $shareNaam" -ForegroundColor Green
-            }
-            catch {
-                Schrijf-Log "FOUT bij aanmaken share '$shareNaam': $_"
-                Write-Host "FOUT: $_" -ForegroundColor Red
-            }
-        }
-    }
+    Write-Host ""
+    Write-Host `
+        "Serverconfiguratie voltooid." `
+        -ForegroundColor Green
 
-    Schrijf-Log "#### Finished creating shares... ####"
-    Read-Host "Druk op ENTER om verder te gaan"
+    Write-BESVGeneralLog `
+        -Message "Serverconfiguratie voltooid"
 }
+
+# ============================================================
+# FUNCTION : Set-ClientConfiguration
+# ============================================================
+
+function Set-ClientConfiguration {
+
+<#
+.SYNOPSIS
+Voert clientconfiguratie uit.
+
+.DESCRIPTION
+Deze functie voert de basisconfiguratie uit
+voor een Windows client.
+
+.EXAMPLE
+Set-ClientConfiguration
+
+.NOTES
+Auteur : besv
+
+Bestand :
+algemeenbesv.psm1
+
+Bronnen :
+
+F. Vanhoo,
+"PowerShell Vlot gebruiken"
+
+- Hfst. 138 : Scripts en modules
+- Hfst. 144 : Scripts, modules en functies opbouwen
+
+Microsoft Learn:
+https://learn.microsoft.com/en-us/powershell/
+
+#>
+
+    Write-Host ""
+    Write-Host `
+        "Start clientconfiguratie..." `
+        -ForegroundColor Cyan
+
+    Write-BESVGeneralLog `
+        -Message "Clientconfiguratie gestart"
+
+    Set-BESVHostname
+
+    Set-BESVNetworkAdapters
+
+    Set-BESVStaticIP
+
+    Write-Host ""
+    Write-Host `
+        "Clientconfiguratie voltooid." `
+        -ForegroundColor Green
+
+    Write-BESVGeneralLog `
+        -Message "Clientconfiguratie voltooid"
+}
+
+# ============================================================
+# EXPORT FUNCTIONS
+# ============================================================
+
+Export-ModuleMember -Function * -Alias *
